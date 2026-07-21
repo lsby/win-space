@@ -89,14 +89,28 @@ class HiddenWindow : Window
                 NativeMethods.SetWindowLong(hwndBg, NativeMethods.GWL_EXSTYLE, exstyle | NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_TOOLWINDOW);
             };
         }
+
+        var rect = 获取显示器矩形(hMonitor);
+        
+        double dpiScaleX = 1.0;
+        double dpiScaleY = 1.0;
+        if (NativeMethods.GetDpiForMonitor(hMonitor, NativeMethods.Monitor_DPI_Type.MDT_Effective_DPI, out uint dpiX, out uint dpiY) == 0)
+        {
+            dpiScaleX = dpiX / 96.0;
+            dpiScaleY = dpiY / 96.0;
+        }
+
+        分组.BlackBackground.Left = rect.left / dpiScaleX;
+        分组.BlackBackground.Top = rect.top / dpiScaleY;
+        分组.BlackBackground.Width = (rect.right - rect.left) / dpiScaleX;
+        分组.BlackBackground.Height = (rect.bottom - rect.top) / dpiScaleY;
+
         分组.BlackBackground.Show();
 
         IntPtr bgHwnd = new WindowInteropHelper(分组.BlackBackground).Handle;
         if (bgHwnd != IntPtr.Zero && targetHwnd != IntPtr.Zero)
         {
-            var rect = 获取显示器矩形(hMonitor);
-            // 使用物理像素直接定位并调整大小，避免 WPF 的 DPI 缩放导致窗口溢出到其他屏幕
-            // 同时将其 Z 轴放置在目标窗口紧挨着的下方
+            // 强制使用物理坐标来定位和缩放，同时设置 Z 轴 (不使用 NOMOVE 和 NOSIZE)
             NativeMethods.SetWindowPos(bgHwnd, targetHwnd, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, NativeMethods.SWP_NOACTIVATE);
         }
     }
@@ -331,6 +345,7 @@ class HiddenWindow : Window
         var 显示器矩形 = 获取显示器矩形(hMonitor);
 
         _mcWindow = new MissionControlWindow(
+            hMonitor,
             分组,
             显示器矩形,
             onSelect: (targetIndex) => 

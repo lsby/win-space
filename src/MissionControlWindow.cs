@@ -23,7 +23,7 @@ class MissionControlWindow : Window
     private 显示器空间分组 _分组;
     private NativeMethods.RECT _显示器矩形;
     
-    public MissionControlWindow(显示器空间分组 分组, NativeMethods.RECT 显示器矩形, Action<int> onSelect, Action<int> onCloseSpace, Action<int, int> onReorder)
+    public MissionControlWindow(IntPtr hMonitor, 显示器空间分组 分组, NativeMethods.RECT 显示器矩形, Action<int> onSelect, Action<int> onCloseSpace, Action<int, int> onReorder)
     {
         _onSelect = onSelect;
         _onCloseSpace = onCloseSpace;
@@ -66,9 +66,13 @@ class MissionControlWindow : Window
         var style = (Style)System.Windows.Markup.XamlReader.Parse(scrollBarStyle);
         Resources.Add(typeof(System.Windows.Controls.Primitives.ScrollBar), style);
 
-        var presentationSource = PresentationSource.FromVisual(System.Windows.Application.Current.MainWindow);
-        double dpiScaleX = presentationSource?.CompositionTarget?.TransformToDevice.M11 ?? 1.0;
-        double dpiScaleY = presentationSource?.CompositionTarget?.TransformToDevice.M22 ?? 1.0;
+        double dpiScaleX = 1.0;
+        double dpiScaleY = 1.0;
+        if (NativeMethods.GetDpiForMonitor(hMonitor, NativeMethods.Monitor_DPI_Type.MDT_Effective_DPI, out uint dpiX, out uint dpiY) == 0)
+        {
+            dpiScaleX = dpiX / 96.0;
+            dpiScaleY = dpiY / 96.0;
+        }
 
         Left = 显示器矩形.left / dpiScaleX;
         Top = 显示器矩形.top / dpiScaleY;
@@ -128,6 +132,14 @@ class MissionControlWindow : Window
         base.OnSourceInitialized(e);
         var source = PresentationSource.FromVisual(this) as System.Windows.Interop.HwndSource;
         source?.AddHook(WndProc);
+
+        if (source != null)
+        {
+            NativeMethods.SetWindowPos(source.Handle, IntPtr.Zero, 
+                _显示器矩形.left, _显示器矩形.top, 
+                _显示器矩形.right - _显示器矩形.left, _显示器矩形.bottom - _显示器矩形.top, 
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOZORDER);
+        }
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)

@@ -36,6 +36,7 @@ internal static class NativeMethods
     public const uint SWP_FRAMECHANGED = 0x0020;
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint MONITOR_DEFAULTTONEAREST = 2;
     public const int SW_MAXIMIZE = 3;
@@ -133,4 +134,15 @@ internal static class NativeMethods
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    [DllImport("shcore.dll")]
+    public static extern int GetDpiForMonitor(IntPtr hmonitor, Monitor_DPI_Type dpiType, out uint dpiX, out uint dpiY);
+
+    public enum Monitor_DPI_Type
+    {
+        MDT_Effective_DPI = 0,
+        MDT_Angular_DPI = 1,
+        MDT_Raw_DPI = 2,
+        MDT_Default = MDT_Effective_DPI
+    }
 }
