@@ -238,23 +238,29 @@ class HiddenWindow : Window
                     // 恢复系统菜单（重新允许拖动）
                     NativeMethods.GetSystemMenu(hwnd, true);
 
+                    IntPtr HWND_NOTOPMOST = new IntPtr(-2);
                     if (!space.WasMaximized)
                     {
                         // 原本不是最大化的，恢复原大小
                         NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+                        
+                        int width = space.OriginalRect.right - space.OriginalRect.left;
+                        int height = space.OriginalRect.bottom - space.OriginalRect.top;
+                        
+                        uint flags = NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW;
+                        if (width <= 0 || height <= 0)
+                        {
+                            flags |= 0x0001 | 0x0002;
+                        }
+                        
+                        NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, space.OriginalRect.left, space.OriginalRect.top, width, height, flags);
                     }
-                    
-                    IntPtr HWND_NOTOPMOST = new IntPtr(-2);
-                    int width = space.OriginalRect.right - space.OriginalRect.left;
-                    int height = space.OriginalRect.bottom - space.OriginalRect.top;
-                    
-                    uint flags = NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW;
-                    if (width <= 0 || height <= 0)
+                    else
                     {
-                        flags |= 0x0001 | 0x0002;
+                        // 恢复最大化
+                        NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+                        NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW);
                     }
-                    
-                    NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, space.OriginalRect.left, space.OriginalRect.top, width, height, flags);
                 }
             }
         }
@@ -430,22 +436,27 @@ class HiddenWindow : Window
             // 恢复系统菜单（重新允许拖动）
             NativeMethods.GetSystemMenu(hwnd, true);
 
+            IntPtr HWND_NOTOPMOST = new IntPtr(-2);
             if (!space.WasMaximized)
             {
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+                
+                int width = space.OriginalRect.right - space.OriginalRect.left;
+                int height = space.OriginalRect.bottom - space.OriginalRect.top;
+                
+                uint flags = NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW;
+                if (width <= 0 || height <= 0)
+                {
+                    flags |= 0x0001 | 0x0002;
+                }
+                
+                NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, space.OriginalRect.left, space.OriginalRect.top, width, height, flags); 
             }
-            
-            IntPtr HWND_NOTOPMOST = new IntPtr(-2);
-            int width = space.OriginalRect.right - space.OriginalRect.left;
-            int height = space.OriginalRect.bottom - space.OriginalRect.top;
-            
-            uint flags = NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW;
-            if (width <= 0 || height <= 0)
+            else
             {
-                flags |= 0x0001 | 0x0002;
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+                NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW);
             }
-            
-            NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, space.OriginalRect.left, space.OriginalRect.top, width, height, flags); 
         }
 
         分组.Spaces.RemoveAt(index);
