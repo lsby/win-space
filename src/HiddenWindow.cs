@@ -20,6 +20,8 @@ class HiddenWindow : Window
     private MissionControlWindow? _mcWindow = null;
     private IntPtr _winEventHook = IntPtr.Zero;
     private NativeMethods.WinEventDelegate? _winEventDelegate;
+    private IntPtr _fgWinEventHook = IntPtr.Zero;
+    private NativeMethods.WinEventDelegate? _fgWinEventDelegate;
 
     /// <summary>
     /// 将窗口铺满屏幕（覆盖任务栏，保留标题栏）
@@ -60,7 +62,7 @@ class HiddenWindow : Window
             // 第二步：触发非客户区重绘 (SWP_FRAMECHANGED)，此时不改变位置 (NOMOVE, NOSIZE)
             // 分成两步走可以极大避免某些应用（如 Chromium/Edge）在跨负数坐标屏幕时，
             // 因为瞬间丢失边框又大跨度移动造成的内部布局溢出崩溃。
-            NativeMethods.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 
+            NativeMethods.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                 NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_FRAMECHANGED);
         }
     }
@@ -87,7 +89,7 @@ class HiddenWindow : Window
         }
 
         var rect = 获取显示器矩形(hMonitor);
-        
+
         double dpiScaleX = 1.0;
         double dpiScaleY = 1.0;
         if (NativeMethods.GetDpiForMonitor(hMonitor, NativeMethods.Monitor_DPI_Type.MDT_Effective_DPI, out uint dpiX, out uint dpiY) == 0)
@@ -122,7 +124,7 @@ class HiddenWindow : Window
         _notifyIcon.Icon = SystemIcons.Application;
         _notifyIcon.Text = "WinSpace";
         _notifyIcon.Visible = true;
-        
+
         var contextMenu = new ContextMenuStrip();
         contextMenu.Items.Add("设置", null, (s, e) => OpenSettings());
         contextMenu.Items.Add("重置", null, (s, e) => UnlockAllWindows());
@@ -153,12 +155,18 @@ class HiddenWindow : Window
         _winEventHook = NativeMethods.SetWinEventHook(
             NativeMethods.EVENT_OBJECT_DESTROY, NativeMethods.EVENT_OBJECT_DESTROY,
             IntPtr.Zero, _winEventDelegate, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
+
+        // 监听前台窗口切换事件
+        _fgWinEventDelegate = new NativeMethods.WinEventDelegate(OnForegroundWindowChanged);
+        _fgWinEventHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_FOREGROUND, NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            IntPtr.Zero, _fgWinEventDelegate, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
     }
 
     private void RegisterAllHotkeys()
     {
         if (_windowHandle == IntPtr.Zero) return;
-        
+
         NativeMethods.UnregisterHotKey(_windowHandle, NativeMethods.HOTKEY_ID);
         NativeMethods.UnregisterHotKey(_windowHandle, NativeMethods.HOTKEY_LEFT);
         NativeMethods.UnregisterHotKey(_windowHandle, NativeMethods.HOTKEY_RIGHT);
@@ -169,8 +177,74 @@ class HiddenWindow : Window
         NativeMethods.RegisterHotKey(_windowHandle, NativeMethods.HOTKEY_LEFT, s.LeftHotkey.Modifiers, s.LeftHotkey.Key);
         NativeMethods.RegisterHotKey(_windowHandle, NativeMethods.HOTKEY_RIGHT, s.RightHotkey.Modifiers, s.RightHotkey.Key);
         NativeMethods.RegisterHotKey(_windowHandle, NativeMethods.HOTKEY_UP, s.UpHotkey.Modifiers, s.UpHotkey.Key);
-        
+
         _notifyIcon.Text = $"WinSpace ({s.MainHotkey})";
+    }
+
+    private void OnForegroundWindowChanged(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+        int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
+    {
+        if (hwnd == IntPtr.Zero || !NativeMethods.IsWindowVisible(hwnd)) return;
+
+        // 忽略我们自己的 UI 窗口
+        if (hwnd == _windowHandle || (_mcWindow != null && hwnd == new WindowInteropHelper(_mcWindow).Handle)) return;
+
+        var manager = SpaceManager.Instance;
+
+        // 忽略用于遮挡桌面的黑底窗口
+        if (manager.分组字典.Values.Any(g => g.BlackBackground != null && new WindowInteropHelper(g.BlackBackground).Handle == hwnd)) return;
+
+        // 过滤一些不应触发切换的杂项窗口 (如 Tooltip 或右键菜单)
+        int exStyle = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
+        if ((exStyle & NativeMethods.WS_EX_TOOLWINDOW) != 0) return;
+
+        StringBuilder className = new StringBuilder(256);
+        NativeMethods.GetClassName(hwnd, className, className.Capacity);
+        string cName = className.ToString();
+
+        // 忽略桌面背景和标准右键菜单
+        if (cName == "Progman" || cName == "WorkerW" || cName == "#32768") return;
+
+        // 检查这个激活的窗口是否有 Owner (比如是某个全屏应用内部弹出的另存为对话框)
+        IntPtr ownerHwnd = NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER);
+        if (ownerHwnd != IntPtr.Zero)
+        {
+            var ownerGroup = manager.查找窗口所在分组(ownerHwnd);
+            if (ownerGroup != null)
+            {
+                // 如果是当前空间弹出的子窗口，则留在当前空间
+                int tIndex = ownerGroup.Spaces.FindIndex(s => s.Hwnd == ownerHwnd);
+                if (ownerGroup.CurrentIndex != tIndex)
+                {
+                    SwitchSpace(ownerGroup.显示器句柄, tIndex);
+                }
+                return;
+            }
+        }
+
+        // 查找该窗口是否在我们的管理分组中
+        var spaceGroup = manager.查找窗口所在分组(hwnd);
+        if (spaceGroup != null)
+        {
+            int targetIndex = spaceGroup.Spaces.FindIndex(s => s.Hwnd == hwnd);
+            if (spaceGroup.CurrentIndex != targetIndex)
+            {
+                SwitchSpace(spaceGroup.显示器句柄, targetIndex);
+            }
+        }
+        else
+        {
+            // 这是一个不被我们管理的窗口 (例如新打开的 QQ，或者任务栏等桌面元素)
+            // 我们应该切换到桌面，以确保用户能看到它
+            IntPtr hMonitor = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+            var group = manager.获取或创建分组(hMonitor);
+
+            // 如果当前不是在桌面，切回桌面
+            if (group.CurrentIndex != -1)
+            {
+                SwitchSpace(hMonitor, -1);
+            }
+        }
     }
 
     /// <summary>
@@ -206,6 +280,12 @@ class HiddenWindow : Window
             _winEventHook = IntPtr.Zero;
         }
 
+        if (_fgWinEventHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_fgWinEventHook);
+            _fgWinEventHook = IntPtr.Zero;
+        }
+
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _source?.RemoveHook(HwndHook);
@@ -234,7 +314,7 @@ class HiddenWindow : Window
                     int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
                     style |= NativeMethods.WS_THICKFRAME;
                     NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_STYLE, style);
-                    
+
                     // 恢复系统菜单（重新允许拖动）
                     NativeMethods.GetSystemMenu(hwnd, true);
 
@@ -243,16 +323,16 @@ class HiddenWindow : Window
                     {
                         // 原本不是最大化的，恢复原大小
                         NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
-                        
+
                         int width = space.OriginalRect.right - space.OriginalRect.left;
                         int height = space.OriginalRect.bottom - space.OriginalRect.top;
-                        
+
                         uint flags = NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW;
                         if (width <= 0 || height <= 0)
                         {
                             flags |= 0x0001 | 0x0002;
                         }
-                        
+
                         NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, space.OriginalRect.left, space.OriginalRect.top, width, height, flags);
                     }
                     else
@@ -272,7 +352,7 @@ class HiddenWindow : Window
             if (NativeMethods.IsWindowVisible(hwnd))
             {
                 int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
-                
+
                 // 只有带有标题栏的主窗口才强制恢复，避免影响系统的各种无边框弹窗、菜单
                 if ((style & NativeMethods.WS_CAPTION) == NativeMethods.WS_CAPTION)
                 {
@@ -282,12 +362,12 @@ class HiddenWindow : Window
                         style |= NativeMethods.WS_THICKFRAME;
                         NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_STYLE, style);
                     }
-                    
+
                     // 恢复系统菜单（重新允许拖动等操作）
                     NativeMethods.GetSystemMenu(hwnd, true);
 
                     // 取消顶层置顶（HWND_NOTOPMOST），并触发框架刷新
-                    NativeMethods.SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, 
+                    NativeMethods.SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0,
                         NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW);
                 }
             }
@@ -393,7 +473,7 @@ class HiddenWindow : Window
             hMonitor,
             分组,
             显示器矩形,
-            onSelect: (targetIndex) => 
+            onSelect: (targetIndex) =>
             {
                 _mcWindow = null;
                 if (targetIndex != 分组.CurrentIndex)
@@ -410,7 +490,7 @@ class HiddenWindow : Window
                 ReorderSpace(hMonitor, from, to);
             }
         );
-        
+
         _mcWindow.Closed += (s, e) => { _mcWindow = null; };
         _mcWindow.Show();
     }
@@ -427,12 +507,12 @@ class HiddenWindow : Window
         if (NativeMethods.IsWindow(hwnd))
         {
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
-            
+
             // 恢复可调整大小的边框
             int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
             style |= NativeMethods.WS_THICKFRAME;
             NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_STYLE, style);
-            
+
             // 恢复系统菜单（重新允许拖动）
             NativeMethods.GetSystemMenu(hwnd, true);
 
@@ -440,17 +520,17 @@ class HiddenWindow : Window
             if (!space.WasMaximized)
             {
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
-                
+
                 int width = space.OriginalRect.right - space.OriginalRect.left;
                 int height = space.OriginalRect.bottom - space.OriginalRect.top;
-                
+
                 uint flags = NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW;
                 if (width <= 0 || height <= 0)
                 {
                     flags |= 0x0001 | 0x0002;
                 }
-                
-                NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, space.OriginalRect.left, space.OriginalRect.top, width, height, flags); 
+
+                NativeMethods.SetWindowPos(hwnd, HWND_NOTOPMOST, space.OriginalRect.left, space.OriginalRect.top, width, height, flags);
             }
             else
             {
@@ -464,7 +544,7 @@ class HiddenWindow : Window
 
         if (分组.CurrentIndex == index)
         {
-            分组.CurrentIndex = -1; 
+            分组.CurrentIndex = -1;
             分组.BlackBackground?.Hide();
         }
         else if (分组.CurrentIndex > index)
@@ -524,7 +604,7 @@ class HiddenWindow : Window
         else 分组.Spaces[分组.CurrentIndex].Snapshot = currentSnapshot;
 
         if (分组.CurrentIndex != -1) NativeMethods.ShowWindow(分组.Spaces[分组.CurrentIndex].Hwnd, NativeMethods.SW_HIDE);
-        if (targetIndex != -1) 
+        if (targetIndex != -1)
         {
             var space = 分组.Spaces[targetIndex];
             设置窗口全屏(space.Hwnd, hMonitor);
@@ -548,7 +628,7 @@ class HiddenWindow : Window
         {
             IntPtr targetHwnd = NativeMethods.GetForegroundWindow();
             if (targetHwnd == IntPtr.Zero || targetHwnd == _windowHandle || (_mcWindow != null && targetHwnd == new WindowInteropHelper(_mcWindow).Handle)) return;
-            
+
             var manager = SpaceManager.Instance;
 
             // 如果窗口已经全屏，则执行反向操作（取消全屏并恢复原状）
@@ -566,7 +646,7 @@ class HiddenWindow : Window
             IntPtr hMonitor = NativeMethods.MonitorFromWindow(targetHwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
             var 分组 = manager.获取或创建分组(hMonitor);
 
-            if (分组.CurrentIndex == -1) 
+            if (分组.CurrentIndex == -1)
             {
                 // 禁用动画，让隐藏操作瞬间完成，避免截取到带有半透明残影的桌面
                 int disableAnimation = 1;
@@ -575,22 +655,22 @@ class HiddenWindow : Window
                 // 暂时隐藏窗口，让桌面重新绘制，这样截取的桌面缩略图就不包含该窗口
                 NativeMethods.ShowWindow(targetHwnd, NativeMethods.SW_HIDE);
                 await System.Threading.Tasks.Task.Delay(50); // 稍微等待 DWM 重绘
-                
+
                 分组.DesktopSnapshot = 截取显示器画面(hMonitor);
-                
+
                 // 恢复窗口、重新启用动画，并设为前台
                 NativeMethods.ShowWindow(targetHwnd, NativeMethods.SW_SHOW);
                 int enableAnimation = 0;
                 NativeMethods.DwmSetWindowAttribute(targetHwnd, NativeMethods.DWMWA_TRANSITIONS_FORCEDISABLE, ref enableAnimation, sizeof(int));
                 NativeMethods.SetForegroundWindow(targetHwnd);
             }
-            
+
             var sb = new StringBuilder(256);
             NativeMethods.GetWindowText(targetHwnd, sb, sb.Capacity);
-            
+
             NativeMethods.GetWindowRect(targetHwnd, out NativeMethods.RECT winRect);
             bool wasMaximized = NativeMethods.IsZoomed(targetHwnd);
-            
+
             manager.AddSpace(hMonitor, targetHwnd, sb.ToString(), winRect, wasMaximized);
             manager.SaveState();
 

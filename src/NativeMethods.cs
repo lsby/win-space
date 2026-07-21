@@ -45,9 +45,12 @@ internal static class NativeMethods
     public const int SW_RESTORE = 9;
 
     // WinEvent 常量
+    public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     public const uint EVENT_OBJECT_DESTROY = 0x8001;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const int OBJID_WINDOW = 0;
+
+    public const int GW_OWNER = 4;
 
     // 系统菜单控制
     public const uint SC_MOVE = 0xF010;
@@ -113,6 +116,12 @@ internal static class NativeMethods
     public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+    
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
