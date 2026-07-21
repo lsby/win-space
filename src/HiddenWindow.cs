@@ -20,20 +20,12 @@ class HiddenWindow : Window
     private MissionControlWindow? _mcWindow = null;
     private IntPtr _winEventHook = IntPtr.Zero;
     private NativeMethods.WinEventDelegate? _winEventDelegate;
-    private static readonly string _logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "win-space-debug.log");
-
-    private void Log(string 消息)
-    {
-        try { File.AppendAllText(_logPath, $"[{DateTime.Now:HH:mm:ss.fff}] {消息}\n"); } catch { }
-    }
 
     /// <summary>
     /// 将窗口铺满屏幕（覆盖任务栏，保留标题栏）
     /// </summary>
     private void 设置窗口全屏(IntPtr hwnd, IntPtr hMonitor)
     {
-        Log($"[设置全屏] 开始 hwnd=0x{hwnd:X}");
-        
         NativeMethods.MONITORINFO mi = new NativeMethods.MONITORINFO();
         mi.cbSize = Marshal.SizeOf(mi);
         if (NativeMethods.GetMonitorInfo(hMonitor, ref mi))
@@ -49,9 +41,11 @@ class HiddenWindow : Window
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
             }
 
-            // 去除可调整大小的边框(WS_THICKFRAME)，这样可以：
-            // 1. 防止鼠标放在边缘变成拖动调节大小的图标
-            // 2. 消除 Windows 10/11 默认的 7 像素隐形调整边框，让窗口真正贴合屏幕边缘
+            // 先第一步：不改变样式，先将窗口安全移动并调整大小到目标显示器上
+            IntPtr HWND_TOPMOST = new IntPtr(-1);
+            NativeMethods.SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, NativeMethods.SWP_SHOWWINDOW);
+
+            // 去除可调整大小的边框
             int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
             style &= ~NativeMethods.WS_THICKFRAME;
             NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_STYLE, style);
@@ -63,9 +57,11 @@ class HiddenWindow : Window
                 NativeMethods.RemoveMenu(hMenu, NativeMethods.SC_MOVE, NativeMethods.MF_BYCOMMAND);
             }
 
-            // 设为显示器完全一致的尺寸，Windows 通常会自动将其提升到任务栏上方
-            IntPtr HWND_TOPMOST = new IntPtr(-1);
-            NativeMethods.SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, NativeMethods.SWP_SHOWWINDOW | NativeMethods.SWP_FRAMECHANGED);
+            // 第二步：触发非客户区重绘 (SWP_FRAMECHANGED)，此时不改变位置 (NOMOVE, NOSIZE)
+            // 分成两步走可以极大避免某些应用（如 Chromium/Edge）在跨负数坐标屏幕时，
+            // 因为瞬间丢失边框又大跨度移动造成的内部布局溢出崩溃。
+            NativeMethods.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_FRAMECHANGED);
         }
     }
 
@@ -129,6 +125,7 @@ class HiddenWindow : Window
         
         var contextMenu = new ContextMenuStrip();
         contextMenu.Items.Add("设置", null, (s, e) => OpenSettings());
+        contextMenu.Items.Add("重置", null, (s, e) => UnlockAllWindows());
         contextMenu.Items.Add("退出", null, (s, e) => Application.Current.Shutdown());
         _notifyIcon.ContextMenuStrip = contextMenu;
     }
@@ -189,8 +186,6 @@ class HiddenWindow : Window
         var 所在分组 = manager.查找窗口所在分组(hwnd);
         if (所在分组 == null) return;
 
-        Log($"检测到已管理窗口被销毁: hwnd=0x{hwnd:X}");
-
         int 被移除索引 = 所在分组.Spaces.FindIndex(s => s.Hwnd == hwnd);
         bool 是当前活动 = 所在分组.CurrentIndex == 被移除索引;
 
@@ -199,7 +194,6 @@ class HiddenWindow : Window
 
         if (是当前活动)
         {
-            Log($"被销毁的窗口是当前活动空间，已切回桌面");
             所在分组.BlackBackground?.Hide();
         }
     }
@@ -220,6 +214,13 @@ class HiddenWindow : Window
         NativeMethods.UnregisterHotKey(_windowHandle, NativeMethods.HOTKEY_RIGHT);
         NativeMethods.UnregisterHotKey(_windowHandle, NativeMethods.HOTKEY_UP);
 
+        UnlockAllWindows();
+
+        base.OnClosed(e);
+    }
+
+    private void UnlockAllWindows()
+    {
         // 恢复所有显示器分组中的窗口
         foreach (var 分组 in SpaceManager.Instance.分组字典.Values)
         {
@@ -258,9 +259,37 @@ class HiddenWindow : Window
             }
         }
 
-        SpaceManager.Instance.ClearState();
+        // 增加兜底逻辑：遍历系统中所有的可见窗口，如果其带有标题栏，强制恢复其边框和可移动属性
+        // 这样可以解决意外情况下，部分窗口丢失了在 SpaceManager 中的记录但依然处于无边框锁定的问题
+        NativeMethods.EnumWindows((hwnd, lParam) =>
+        {
+            if (NativeMethods.IsWindowVisible(hwnd))
+            {
+                int style = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_STYLE);
+                
+                // 只有带有标题栏的主窗口才强制恢复，避免影响系统的各种无边框弹窗、菜单
+                if ((style & NativeMethods.WS_CAPTION) == NativeMethods.WS_CAPTION)
+                {
+                    // 恢复可调整大小边框
+                    if ((style & NativeMethods.WS_THICKFRAME) == 0)
+                    {
+                        style |= NativeMethods.WS_THICKFRAME;
+                        NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_STYLE, style);
+                    }
+                    
+                    // 恢复系统菜单（重新允许拖动等操作）
+                    NativeMethods.GetSystemMenu(hwnd, true);
 
-        base.OnClosed(e);
+                    // 取消顶层置顶（HWND_NOTOPMOST），并触发框架刷新
+                    NativeMethods.SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, 
+                        NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_FRAMECHANGED | NativeMethods.SWP_SHOWWINDOW);
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        SpaceManager.Instance.ClearState();
+        SpaceManager.Instance.分组字典.Clear();
     }
 
     private IntPtr HwndHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -288,21 +317,31 @@ class HiddenWindow : Window
         return NativeMethods.MonitorFromWindow(焦点窗口, NativeMethods.MONITOR_DEFAULTTONEAREST);
     }
 
-    private BitmapSource 截取显示器画面(IntPtr hMonitor)
+    private BitmapSource? 截取显示器画面(IntPtr hMonitor)
     {
-        NativeMethods.MONITORINFO mi = new NativeMethods.MONITORINFO();
-        mi.cbSize = Marshal.SizeOf(mi);
-        NativeMethods.GetMonitorInfo(hMonitor, ref mi);
+        int x = 0, y = 0, w = 0, h = 0;
+        try
+        {
+            NativeMethods.MONITORINFO mi = new NativeMethods.MONITORINFO();
+            mi.cbSize = Marshal.SizeOf(mi);
+            if (!NativeMethods.GetMonitorInfo(hMonitor, ref mi)) return null;
 
-        int x = mi.rcMonitor.left;
-        int y = mi.rcMonitor.top;
-        int w = mi.rcMonitor.right - mi.rcMonitor.left;
-        int h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+            x = mi.rcMonitor.left;
+            y = mi.rcMonitor.top;
+            w = mi.rcMonitor.right - mi.rcMonitor.left;
+            h = mi.rcMonitor.bottom - mi.rcMonitor.top;
 
-        using var bmp = new Bitmap(w, h);
-        using var g = Graphics.FromImage(bmp);
-        g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(w, h));
-        return ConvertBitmapToBitmapSource(bmp);
+            if (w <= 0 || h <= 0) return null;
+
+            using var bmp = new Bitmap(w, h);
+            using var g = Graphics.FromImage(bmp);
+            g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(w, h), CopyPixelOperation.SourceCopy);
+            return ConvertBitmapToBitmapSource(bmp);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static BitmapSource ConvertBitmapToBitmapSource(Bitmap bitmap)
@@ -494,61 +533,67 @@ class HiddenWindow : Window
 
     private async void MakeForegroundWindowFullscreen()
     {
-        IntPtr targetHwnd = NativeMethods.GetForegroundWindow();
-        if (targetHwnd == IntPtr.Zero || targetHwnd == _windowHandle || (_mcWindow != null && targetHwnd == new WindowInteropHelper(_mcWindow).Handle)) return;
-        
-        var manager = SpaceManager.Instance;
-
-        // 如果窗口已经全屏，则执行反向操作（取消全屏并恢复原状）
-        var existingGroup = manager.查找窗口所在分组(targetHwnd);
-        if (existingGroup != null)
+        try
         {
-            int index = existingGroup.Spaces.FindIndex(s => s.Hwnd == targetHwnd);
-            if (index != -1)
+            IntPtr targetHwnd = NativeMethods.GetForegroundWindow();
+            if (targetHwnd == IntPtr.Zero || targetHwnd == _windowHandle || (_mcWindow != null && targetHwnd == new WindowInteropHelper(_mcWindow).Handle)) return;
+            
+            var manager = SpaceManager.Instance;
+
+            // 如果窗口已经全屏，则执行反向操作（取消全屏并恢复原状）
+            var existingGroup = manager.查找窗口所在分组(targetHwnd);
+            if (existingGroup != null)
             {
-                CloseSpace(existingGroup.显示器句柄, index);
+                int index = existingGroup.Spaces.FindIndex(s => s.Hwnd == targetHwnd);
+                if (index != -1)
+                {
+                    CloseSpace(existingGroup.显示器句柄, index);
+                }
+                return;
             }
-            return;
-        }
 
-        IntPtr hMonitor = NativeMethods.MonitorFromWindow(targetHwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
-        var 分组 = manager.获取或创建分组(hMonitor);
+            IntPtr hMonitor = NativeMethods.MonitorFromWindow(targetHwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+            var 分组 = manager.获取或创建分组(hMonitor);
 
-        if (分组.CurrentIndex == -1) 
-        {
-            // 禁用动画，让隐藏操作瞬间完成，避免截取到带有半透明残影的桌面
-            int disableAnimation = 1;
-            NativeMethods.DwmSetWindowAttribute(targetHwnd, NativeMethods.DWMWA_TRANSITIONS_FORCEDISABLE, ref disableAnimation, sizeof(int));
+            if (分组.CurrentIndex == -1) 
+            {
+                // 禁用动画，让隐藏操作瞬间完成，避免截取到带有半透明残影的桌面
+                int disableAnimation = 1;
+                NativeMethods.DwmSetWindowAttribute(targetHwnd, NativeMethods.DWMWA_TRANSITIONS_FORCEDISABLE, ref disableAnimation, sizeof(int));
 
-            // 暂时隐藏窗口，让桌面重新绘制，这样截取的桌面缩略图就不包含该窗口
-            NativeMethods.ShowWindow(targetHwnd, NativeMethods.SW_HIDE);
-            await System.Threading.Tasks.Task.Delay(50); // 稍微等待 DWM 重绘
+                // 暂时隐藏窗口，让桌面重新绘制，这样截取的桌面缩略图就不包含该窗口
+                NativeMethods.ShowWindow(targetHwnd, NativeMethods.SW_HIDE);
+                await System.Threading.Tasks.Task.Delay(50); // 稍微等待 DWM 重绘
+                
+                分组.DesktopSnapshot = 截取显示器画面(hMonitor);
+                
+                // 恢复窗口、重新启用动画，并设为前台
+                NativeMethods.ShowWindow(targetHwnd, NativeMethods.SW_SHOW);
+                int enableAnimation = 0;
+                NativeMethods.DwmSetWindowAttribute(targetHwnd, NativeMethods.DWMWA_TRANSITIONS_FORCEDISABLE, ref enableAnimation, sizeof(int));
+                NativeMethods.SetForegroundWindow(targetHwnd);
+            }
             
-            分组.DesktopSnapshot = 截取显示器画面(hMonitor);
+            var sb = new StringBuilder(256);
+            NativeMethods.GetWindowText(targetHwnd, sb, sb.Capacity);
             
-            // 恢复窗口、重新启用动画，并设为前台
-            NativeMethods.ShowWindow(targetHwnd, NativeMethods.SW_SHOW);
-            int enableAnimation = 0;
-            NativeMethods.DwmSetWindowAttribute(targetHwnd, NativeMethods.DWMWA_TRANSITIONS_FORCEDISABLE, ref enableAnimation, sizeof(int));
-            NativeMethods.SetForegroundWindow(targetHwnd);
+            NativeMethods.GetWindowRect(targetHwnd, out NativeMethods.RECT winRect);
+            bool wasMaximized = NativeMethods.IsZoomed(targetHwnd);
+            
+            manager.AddSpace(hMonitor, targetHwnd, sb.ToString(), winRect, wasMaximized);
+            manager.SaveState();
+
+            设置窗口全屏(targetHwnd, hMonitor);
+            显示黑底(hMonitor, targetHwnd);
+
+            if (_mcWindow == null)
+            {
+                var 显示器矩形 = 获取显示器矩形(hMonitor);
+                new OsdWindow(分组.CurrentIndex, 分组.Spaces, 显示器矩形).Show();
+            }
         }
-        
-        var sb = new StringBuilder(256);
-        NativeMethods.GetWindowText(targetHwnd, sb, sb.Capacity);
-        
-        NativeMethods.GetWindowRect(targetHwnd, out NativeMethods.RECT winRect);
-        bool wasMaximized = NativeMethods.IsZoomed(targetHwnd);
-        
-        manager.AddSpace(hMonitor, targetHwnd, sb.ToString(), winRect, wasMaximized);
-        manager.SaveState();
-
-        设置窗口全屏(targetHwnd, hMonitor);
-        显示黑底(hMonitor, targetHwnd);
-
-        if (_mcWindow == null)
+        catch
         {
-            var 显示器矩形 = 获取显示器矩形(hMonitor);
-            new OsdWindow(分组.CurrentIndex, 分组.Spaces, 显示器矩形).Show();
         }
     }
 }
