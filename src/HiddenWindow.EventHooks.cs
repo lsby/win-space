@@ -10,6 +10,7 @@ partial class HiddenWindow
     private void OnForegroundWindowChanged(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
+        if ((DateTime.Now - _lastSwitchTime).TotalMilliseconds < 200) return;
         if (hwnd == IntPtr.Zero || !NativeMethods.IsWindowVisible(hwnd)) return;
 
         // 忽略我们自己的 UI 窗口

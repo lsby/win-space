@@ -110,6 +110,7 @@ partial class HiddenWindow
         }
 
         UpdateTaskbarVisibility();
+        _lastSwitchTime = DateTime.Now;
     }
 
     private void ReorderSpace(IntPtr hMonitor, int from, int to)
@@ -145,6 +146,7 @@ partial class HiddenWindow
 
     private void SwitchSpace(IntPtr hMonitor, int targetIndex)
     {
+        _lastSwitchTime = DateTime.Now;
         var manager = SpaceManager.Instance;
         var 分组 = manager.获取或创建分组(hMonitor);
 
@@ -175,10 +177,12 @@ partial class HiddenWindow
         new OsdWindow(targetIndex, 分组.Spaces, 显示器矩形).Show();
 
         UpdateTaskbarVisibility();
+        _lastSwitchTime = DateTime.Now;
     }
 
     private async void MakeForegroundWindowFullscreen()
     {
+        _lastSwitchTime = DateTime.Now;
         try
         {
             IntPtr targetHwnd = NativeMethods.GetForegroundWindow();
@@ -239,6 +243,7 @@ partial class HiddenWindow
             }
 
             UpdateTaskbarVisibility();
+            _lastSwitchTime = DateTime.Now;
         }
         catch
         {

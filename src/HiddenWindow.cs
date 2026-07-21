@@ -22,6 +22,7 @@ partial class HiddenWindow : Window
     private NativeMethods.WinEventDelegate? _winEventDelegate;
     private IntPtr _fgWinEventHook = IntPtr.Zero;
     private NativeMethods.WinEventDelegate? _fgWinEventDelegate;
+    private DateTime _lastSwitchTime = DateTime.MinValue;
 
     public HiddenWindow()
     {
